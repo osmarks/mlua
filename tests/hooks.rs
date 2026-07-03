@@ -1,10 +1,10 @@
 #![cfg(not(feature = "luau"))]
 
-use std::ops::Deref;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mlua::{DebugEvent, Error, HookTriggers, Lua, Result, ThreadStatus, Value, VmState};
+use mlua::debug::DebugEvent;
+use mlua::{Error, HookTriggers, Lua, Result, Value, VmState};
 
 #[test]
 fn test_hook_triggers() {
@@ -25,7 +25,7 @@ fn test_line_counts() -> Result<()> {
     let lua = Lua::new();
     lua.set_hook(HookTriggers::EVERY_LINE, move |_lua, debug| {
         assert_eq!(debug.event(), DebugEvent::Line);
-        hook_output.lock().unwrap().push(debug.curr_line());
+        hook_output.lock().unwrap().push(debug.current_line().unwrap());
         Ok(VmState::Continue)
     })?;
     lua.load(
@@ -104,14 +104,10 @@ fn test_error_within_hook() -> Result<()> {
     })?;
 
     let err = lua.load("x = 1").exec().expect_err("panic didn't propagate");
-
     match err {
-        Error::CallbackError { cause, .. } => match cause.deref() {
-            Error::RuntimeError(s) => assert_eq!(s, "Something happened in there!"),
-            _ => panic!("wrong callback error kind caught"),
-        },
-        _ => panic!("wrong error kind caught"),
-    };
+        Error::RuntimeError(msg) => assert_eq!(msg, "Something happened in there!"),
+        err => panic!("expected `RuntimeError` with a specific message, got {err:?}"),
+    }
 
     Ok(())
 }
@@ -245,7 +241,7 @@ fn test_hook_threads() -> Result<()> {
     let hook_output = output.clone();
     co.set_hook(HookTriggers::EVERY_LINE, move |_lua, debug| {
         assert_eq!(debug.event(), DebugEvent::Line);
-        hook_output.lock().unwrap().push(debug.curr_line());
+        hook_output.lock().unwrap().push(debug.current_line().unwrap());
         Ok(VmState::Continue)
     })?;
 
@@ -279,20 +275,20 @@ fn test_hook_yield() -> Result<()> {
 
     co.set_hook(HookTriggers::EVERY_LINE, move |_lua, _debug| Ok(VmState::Yield))?;
 
-    #[cfg(any(feature = "lua54", feature = "lua53"))]
+    #[cfg(any(feature = "lua55", feature = "lua54", feature = "lua53"))]
     {
         assert!(co.resume::<()>(()).is_ok());
         assert!(co.resume::<()>(()).is_ok());
         assert!(co.resume::<()>(()).is_ok());
         assert!(co.resume::<()>(()).is_ok());
-        assert!(co.status() == ThreadStatus::Finished);
+        assert!(co.is_finished());
     }
     #[cfg(any(feature = "lua51", feature = "lua52", feature = "luajit"))]
     {
         assert!(
             matches!(co.resume::<()>(()), Err(Error::RuntimeError(err)) if err.contains("attempt to yield from a hook"))
         );
-        assert!(co.status() == ThreadStatus::Error);
+        assert!(co.is_error());
     }
 
     Ok(())
@@ -325,7 +321,7 @@ fn test_global_hook() -> Result<()> {
     thread.resume::<()>(()).unwrap();
     lua.remove_global_hook();
     thread.resume::<()>(()).unwrap();
-    assert_eq!(thread.status(), ThreadStatus::Finished);
+    assert!(thread.is_finished());
     assert_eq!(counter.load(Ordering::Relaxed), 3);
 
     Ok(())

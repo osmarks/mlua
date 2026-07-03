@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::os::raw::c_void;
 use std::ptr;
-use std::string::String as StdString;
 
-use mlua::{Error, LightUserData, Lua, MultiValue, Result, UserData, UserDataMethods, Value};
+use mlua::{
+    AnyUserData, Error, LightUserData, Lua, MultiValue, Result, UserData, UserDataMethods, UserDataRegistry,
+    Value,
+};
 
 #[test]
 fn test_value_eq() -> Result<()> {
@@ -63,7 +65,7 @@ fn test_value_eq() -> Result<()> {
 
     assert!(!table1.to_pointer().is_null());
     assert!(!ptr::eq(table1.to_pointer(), table2.to_pointer()));
-    assert!(ptr::eq(string1.to_pointer(), string2.to_pointer()));
+    assert!(ptr::eq(string1.to_pointer(), string2.to_pointer()) && !string1.to_pointer().is_null());
     assert!(ptr::eq(func1.to_pointer(), func2.to_pointer()));
     assert!(num1.to_pointer().is_null());
 
@@ -178,7 +180,7 @@ fn test_value_to_string() -> Result<()> {
     assert!(thread.to_string()?.starts_with("thread:"));
     assert_eq!(thread.type_name(), "thread");
 
-    lua.register_userdata_type::<StdString>(|reg| {
+    lua.register_userdata_type::<String>(|reg| {
         reg.add_meta_method("__tostring", |_, this, ()| Ok(this.clone()));
     })?;
     let ud: Value = Value::UserData(lua.create_any_userdata(String::from("string userdata"))?);
@@ -213,11 +215,36 @@ fn test_value_to_string() -> Result<()> {
 fn test_debug_format() -> Result<()> {
     let lua = Lua::new();
 
-    lua.register_userdata_type::<HashMap<i32, StdString>>(|_| {})?;
+    lua.register_userdata_type::<HashMap<i32, String>>(|_| {})?;
     let ud = lua
-        .create_any_userdata::<HashMap<i32, StdString>>(HashMap::new())
+        .create_any_userdata::<HashMap<i32, String>>(HashMap::new())
         .map(Value::UserData)?;
     assert!(format!("{ud:#?}").starts_with("HashMap<i32, String>:"));
+
+    struct ToDebugUserData;
+    impl UserData for ToDebugUserData {
+        fn register(registry: &mut UserDataRegistry<Self>) {
+            registry.add_meta_method("__tostring", |_, _, ()| Ok("regular-string"));
+            registry.add_meta_method("__todebugstring", |_, _, ()| Ok("debug-string"));
+        }
+    }
+    let debug_ud = Value::UserData(lua.create_userdata(ToDebugUserData)?);
+    assert_eq!(debug_ud.to_string()?, "regular-string");
+    assert_eq!(format!("{debug_ud:#?}"), "debug-string");
+
+    struct ToStringUserData;
+    impl UserData for ToStringUserData {
+        fn register(registry: &mut UserDataRegistry<Self>) {
+            registry.add_meta_method("__tostring", |_, _, ()| Ok("regular-string"));
+        }
+    }
+    let tostring_only_ud = Value::UserData(lua.create_userdata(ToStringUserData)?);
+    assert_eq!(format!("{tostring_only_ud:#?}"), "regular-string");
+
+    // Check that `AnyUsedata` pretty debug format is same as for `Value::UserData`
+    let any_ud: AnyUserData = lua.create_userdata(ToDebugUserData)?;
+    let value_ud = Value::UserData(any_ud.clone());
+    assert_eq!(format!("{any_ud:#?}"), format!("{value_ud:#?}"));
 
     Ok(())
 }
@@ -239,7 +266,7 @@ fn test_value_conversions() -> Result<()> {
     assert_eq!(Value::Integer(1).as_u32(), Some(1u32));
     assert_eq!(Value::Integer(1).as_i64(), Some(1i64));
     assert_eq!(Value::Integer(1).as_u64(), Some(1u64));
-    #[cfg(any(feature = "lua54", feature = "lua53"))]
+    #[cfg(any(feature = "lua55", feature = "lua54", feature = "lua53"))]
     {
         assert_eq!(Value::Integer(mlua::Integer::MAX).as_i32(), None);
         assert_eq!(Value::Integer(mlua::Integer::MAX).as_u32(), None);
@@ -255,22 +282,15 @@ fn test_value_conversions() -> Result<()> {
         Value::String(lua.create_string("hello")?).as_string().unwrap(),
         "hello"
     );
-    assert_eq!(
-        Value::String(lua.create_string("hello")?).as_str().unwrap(),
-        "hello"
-    );
-    assert_eq!(
-        Value::String(lua.create_string("hello")?)
-            .as_string_lossy()
-            .unwrap(),
-        "hello"
-    );
+    assert_eq!(Value::String(lua.create_string("hello")?).to_string()?, "hello");
     assert!(Value::Table(lua.create_table()?).is_table());
     assert!(Value::Table(lua.create_table()?).as_table().is_some());
     assert!(Value::Function(lua.create_function(|_, ()| Ok(())).unwrap()).is_function());
-    assert!(Value::Function(lua.create_function(|_, ()| Ok(())).unwrap())
-        .as_function()
-        .is_some());
+    assert!(
+        Value::Function(lua.create_function(|_, ()| Ok(())).unwrap())
+            .as_function()
+            .is_some()
+    );
     assert!(Value::Thread(lua.create_thread(lua.load("function() end").eval()?)?).is_thread());
     assert!(
         Value::Thread(lua.create_thread(lua.load("function() end").eval()?)?)

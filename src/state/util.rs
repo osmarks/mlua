@@ -1,16 +1,16 @@
 use std::os::raw::c_int;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::state::{ExtraData, RawLua};
-use crate::util::{self, get_internal_metatable, WrappedFailure};
+use crate::util::{self, WrappedFailure, get_internal_metatable};
 
-pub(super) struct StateGuard<'a>(&'a RawLua, *mut ffi::lua_State);
+struct StateGuard<'a>(&'a RawLua, *mut ffi::lua_State);
 
 impl<'a> StateGuard<'a> {
-    pub(super) fn new(inner: &'a RawLua, mut state: *mut ffi::lua_State) -> Self {
+    fn new(inner: &'a RawLua, mut state: *mut ffi::lua_State) -> Self {
         state = inner.state.replace(state);
         Self(inner, state)
     }
@@ -24,9 +24,10 @@ impl Drop for StateGuard<'_> {
 
 // An optimized version of `callback_error` that does not allocate `WrappedFailure` userdata
 // and instead reuses unused values from previous calls (or allocates new).
-pub(super) unsafe fn callback_error_ext<F, R>(
+pub(crate) unsafe fn callback_error_ext<F, R>(
     state: *mut ffi::lua_State,
     mut extra: *mut ExtraData,
+    wrap_error: bool,
     f: F,
 ) -> R
 where
@@ -51,7 +52,7 @@ where
             }
 
             // We need to check stack for Luau in case when callback is called from interrupt
-            // See https://github.com/Roblox/luau/issues/446 and mlua #142 and #153
+            // See https://github.com/luau-lang/luau/issues/446 and mlua #142 and #153
             #[cfg(feature = "luau")]
             ffi::lua_rawcheckstack(state, 2);
             // Place it to the beginning of the stack
@@ -88,7 +89,7 @@ where
                 PreallocatedFailure::New(_) => {
                     ffi::lua_rotate(state, 1, -1);
                     ffi::lua_xmove(state, ref_thread, 1);
-                    let index = ref_stack_pop(extra);
+                    let index = (*extra).ref_stack_pop();
                     (*extra).wrapped_failure_pool.push(index);
                     (*extra).wrapped_failure_top += 1;
                 }
@@ -101,7 +102,11 @@ where
     // to store a wrapped failure (error or panic) *before* we proceed.
     let prealloc_failure = PreallocatedFailure::reserve(state, extra);
 
-    match catch_unwind(AssertUnwindSafe(|| f(extra, nargs))) {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let rawlua = (*extra).raw_lua();
+        let _guard = StateGuard::new(rawlua, state);
+        f(extra, nargs)
+    })) {
         Ok(Ok(r)) => {
             // Return unused `WrappedFailure` to the pool
             prealloc_failure.release(state, extra);
@@ -109,6 +114,13 @@ where
         }
         Ok(Err(err)) => {
             let wrapped_error = prealloc_failure.r#use(state, extra);
+
+            if !wrap_error {
+                ptr::write(wrapped_error, WrappedFailure::Error(err));
+                get_internal_metatable::<WrappedFailure>(state);
+                ffi::lua_setmetatable(state, -2);
+                ffi::lua_error(state)
+            }
 
             // Build `CallbackError` with traceback
             let traceback = if ffi::lua_checkstack(state, ffi::LUA_TRACEBACK_STACK) != 0 {
@@ -137,32 +149,4 @@ where
             ffi::lua_error(state)
         }
     }
-}
-
-pub(super) unsafe fn ref_stack_pop(extra: *mut ExtraData) -> c_int {
-    let extra = &mut *extra;
-    if let Some(free) = extra.ref_free.pop() {
-        ffi::lua_replace(extra.ref_thread, free);
-        return free;
-    }
-
-    // Try to grow max stack size
-    if extra.ref_stack_top >= extra.ref_stack_size {
-        let mut inc = extra.ref_stack_size; // Try to double stack size
-        while inc > 0 && ffi::lua_checkstack(extra.ref_thread, inc) == 0 {
-            inc /= 2;
-        }
-        if inc == 0 {
-            // Pop item on top of the stack to avoid stack leaking and successfully run destructors
-            // during unwinding.
-            ffi::lua_pop(extra.ref_thread, 1);
-            let top = extra.ref_stack_top;
-            // It is a user error to create enough references to exhaust the Lua max stack size for
-            // the ref thread.
-            panic!("cannot create a Lua reference, out of auxiliary stack space (used {top} slots)");
-        }
-        extra.ref_stack_size += inc;
-    }
-    extra.ref_stack_top += 1;
-    extra.ref_stack_top
 }

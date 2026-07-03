@@ -4,7 +4,6 @@ use std::cell::RefCell;
 use std::os::raw::c_void;
 use std::rc::Rc;
 use std::result::Result as StdResult;
-use std::string::String as StdString;
 
 use rustc_hash::FxHashSet;
 use serde::de::{self, IntoDeserializer};
@@ -15,11 +14,12 @@ use crate::userdata::AnyUserData;
 use crate::value::Value;
 
 /// A struct for deserializing Lua values into Rust values.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Deserializer {
     value: Value,
     options: Options,
     visited: Rc<RefCell<FxHashSet<*const c_void>>>,
+    len: Option<usize>, // A length hint for sequences
 }
 
 /// A struct with options to change default deserializer behavior.
@@ -49,6 +49,24 @@ pub struct Options {
     ///
     /// Default: **false**
     pub sort_keys: bool,
+
+    /// If true, empty Lua tables will be encoded as array, instead of map.
+    ///
+    /// Default: **false**
+    pub encode_empty_tables_as_array: bool,
+
+    /// If true, enable detection of mixed tables.
+    ///
+    /// A mixed table is a table that has both array-like and map-like entries or several borders.
+    /// See [`The Length Operator`] documentation for details about borders.
+    ///
+    /// When this option is disabled, a table with a non-zero length (with one or more borders) will
+    /// be always encoded as an array.
+    ///
+    /// Default: **false**
+    ///
+    /// [`The Length Operator`]: https://www.lua.org/manual/5.4/manual.html#3.4.7
+    pub detect_mixed_tables: bool,
 }
 
 impl Default for Options {
@@ -64,6 +82,8 @@ impl Options {
             deny_unsupported_types: true,
             deny_recursive_tables: true,
             sort_keys: false,
+            encode_empty_tables_as_array: false,
+            detect_mixed_tables: false,
         }
     }
 
@@ -93,6 +113,24 @@ impl Options {
         self.sort_keys = enabled;
         self
     }
+
+    /// Sets [`encode_empty_tables_as_array`] option.
+    ///
+    /// [`encode_empty_tables_as_array`]: #structfield.encode_empty_tables_as_array
+    #[must_use]
+    pub const fn encode_empty_tables_as_array(mut self, enabled: bool) -> Self {
+        self.encode_empty_tables_as_array = enabled;
+        self
+    }
+
+    /// Sets [`detect_mixed_tables`] option.
+    ///
+    /// [`detect_mixed_tables`]: #structfield.detect_mixed_tables
+    #[must_use]
+    pub const fn detect_mixed_tables(mut self, enable: bool) -> Self {
+        self.detect_mixed_tables = enable;
+        self
+    }
 }
 
 impl Deserializer {
@@ -106,7 +144,7 @@ impl Deserializer {
         Deserializer {
             value,
             options,
-            visited: Rc::new(RefCell::new(FxHashSet::default())),
+            ..Default::default()
         }
     }
 
@@ -115,7 +153,13 @@ impl Deserializer {
             value,
             options,
             visited,
+            ..Default::default()
         }
+    }
+
+    fn with_len(mut self, len: usize) -> Self {
+        self.len = Some(len);
+        self
     }
 }
 
@@ -140,14 +184,22 @@ impl<'de> serde::Deserializer<'de> for Deserializer {
                 Ok(s) => visitor.visit_str(&s),
                 Err(_) => visitor.visit_bytes(&s.as_bytes()),
             },
-            Value::Table(ref t) if t.raw_len() > 0 || t.is_array() => self.deserialize_seq(visitor),
-            Value::Table(_) => self.deserialize_map(visitor),
+            Value::Table(ref t) => {
+                if let Some(len) = t.encode_as_array(self.options) {
+                    self.with_len(len).deserialize_seq(visitor)
+                } else {
+                    self.deserialize_map(visitor)
+                }
+            }
             Value::LightUserData(ud) if ud.0.is_null() => visitor.visit_none(),
             Value::UserData(ud) if ud.is_serializable() => {
                 serde_userdata(ud, |value| value.deserialize_any(visitor))
             }
             #[cfg(feature = "luau")]
-            Value::Buffer(buf) => visitor.visit_bytes(unsafe { buf.as_slice() }),
+            Value::Buffer(buf) => {
+                let lua = buf.0.lua.lock();
+                visitor.visit_bytes(buf.as_slice(&lua))
+            }
             Value::Function(_)
             | Value::Thread(_)
             | Value::UserData(_)
@@ -190,14 +242,14 @@ impl<'de> serde::Deserializer<'de> for Deserializer {
             Value::Table(table) => {
                 let _guard = RecursionGuard::new(&table, &self.visited);
 
-                let mut iter = table.pairs::<StdString, Value>();
+                let mut iter = table.pairs::<String, Value>();
                 let (variant, value) = match iter.next() {
                     Some(v) => v?,
                     None => {
                         return Err(de::Error::invalid_value(
                             de::Unexpected::Map,
                             &"map with a single key",
-                        ))
+                        ));
                     }
                 };
 
@@ -249,14 +301,14 @@ impl<'de> serde::Deserializer<'de> for Deserializer {
             Value::Table(t) => {
                 let _guard = RecursionGuard::new(&t, &self.visited);
 
-                let len = t.raw_len();
+                let len = self.len.unwrap_or_else(|| t.raw_len());
                 let mut deserializer = SeqDeserializer {
-                    seq: t.sequence_values(),
+                    seq: t.sequence_values().with_len(len),
                     options: self.options,
                     visited: self.visited,
                 };
                 let seq = visitor.visit_seq(&mut deserializer)?;
-                if deserializer.seq.count() == 0 {
+                if deserializer.seq.next().is_none() {
                     Ok(seq)
                 } else {
                     Err(de::Error::invalid_length(len, &"fewer elements in the table"))
@@ -568,7 +620,7 @@ impl<'de> de::MapAccess<'de> for MapDeserializer<'_> {
 }
 
 struct EnumDeserializer {
-    variant: StdString,
+    variant: String,
     value: Option<Value>,
     options: Options,
     visited: Rc<RefCell<FxHashSet<*const c_void>>>,

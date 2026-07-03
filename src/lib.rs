@@ -35,7 +35,7 @@
 //! The [`Value`] enum and other types implement [`serde::Serialize`] trait to support serializing
 //! Lua values into Rust values.
 //!
-//! Requires `feature = "serialize"`.
+//! Requires `feature = "serde"`.
 //!
 //! # Async/await support
 //!
@@ -61,88 +61,114 @@
 //! [`Future`]: std::future::Future
 //! [`serde::Serialize`]: https://docs.serde.rs/serde/ser/trait.Serialize.html
 //! [`serde::Deserialize`]: https://docs.serde.rs/serde/de/trait.Deserialize.html
+//! [`AsyncThread`]: crate::thread::AsyncThread
 
 // Deny warnings inside doc tests / examples. When this isn't present, rustdoc doesn't show *any*
 // warnings at all.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(send), allow(clippy::arc_with_non_send_sync))]
+#![allow(unsafe_op_in_unsafe_fn)]
 
 #[macro_use]
 mod macros;
 
 mod buffer;
-mod chunk;
 mod conversion;
-mod error;
-mod function;
-mod hook;
-#[cfg(feature = "luau")]
-mod luau;
 mod memory;
 mod multi;
 mod scope;
-mod state;
 mod stdlib;
-mod string;
-mod table;
-mod thread;
 mod traits;
 mod types;
-mod userdata;
 mod util;
 mod value;
 mod vector;
 
+pub mod chunk;
+pub mod debug;
+pub mod error;
+pub mod function;
+#[cfg(any(feature = "luau", doc))]
+#[cfg_attr(docsrs, doc(cfg(feature = "luau")))]
+pub mod luau;
 pub mod prelude;
+pub mod state;
+pub mod string;
+pub mod table;
+pub mod thread;
+pub mod userdata;
 
 pub use bstr::BString;
 pub use ffi::{self, lua_CFunction, lua_State};
+#[cfg(feature = "macros")]
+#[doc(hidden)]
+pub use inventory as __inventory;
 
-pub use crate::chunk::{AsChunk, Chunk, ChunkMode};
-pub use crate::error::{Error, ErrorContext, ExternalError, ExternalResult, Result};
-pub use crate::function::{Function, FunctionInfo};
-pub use crate::hook::{Debug, DebugEvent, DebugNames, DebugSource, DebugStack};
+#[doc(inline)]
+pub use crate::error::{Error, Result};
+#[doc(inline)]
+pub use crate::function::Function;
 pub use crate::multi::{MultiValue, Variadic};
 pub use crate::scope::Scope;
-pub use crate::state::{GCMode, Lua, LuaOptions};
+#[doc(inline)]
+pub use crate::state::{Lua, LuaOptions, WeakLua};
 pub use crate::stdlib::StdLib;
-pub use crate::string::{BorrowedBytes, BorrowedStr, String};
-pub use crate::table::{Table, TablePairs, TableSequence};
-pub use crate::thread::{Thread, ThreadStatus};
-pub use crate::traits::{
-    FromLua, FromLuaMulti, IntoLua, IntoLuaMulti, LuaNativeFn, LuaNativeFnMut, ObjectLike,
-};
+#[doc(inline)]
+pub use crate::string::{BorrowedBytes, BorrowedStr, LuaString};
+#[doc(inline)]
+pub use crate::table::Table;
+#[doc(inline)]
+pub use crate::thread::Thread;
+#[doc(inline)]
+pub use crate::traits::{FromLua, FromLuaMulti, IntoLua, IntoLuaMulti, ObjectLike};
 pub use crate::types::{
-    AppDataRef, AppDataRefMut, Either, Integer, LightUserData, MaybeSend, Number, RegistryKey, VmState,
+    AppDataRef, AppDataRefMut, Either, Integer, LightUserData, MaybeSend, MaybeSync, Number, RegistryKey,
+    VmState,
 };
-pub use crate::userdata::{
-    AnyUserData, MetaMethod, UserData, UserDataFields, UserDataMetatable, UserDataMethods, UserDataRef,
-    UserDataRefMut, UserDataRegistry,
-};
+#[doc(inline)]
+pub use crate::userdata::AnyUserData;
 pub use crate::value::{Nil, Value};
 
-#[cfg(not(feature = "luau"))]
-pub use crate::hook::HookTriggers;
-
-#[cfg(any(feature = "luau", doc))]
-#[cfg_attr(docsrs, doc(cfg(feature = "luau")))]
-pub use crate::{
-    buffer::Buffer,
-    chunk::{CompileConstant, Compiler},
-    function::CoverageInfo,
-    vector::Vector,
+// Re-export some types to keep backward compatibility and avoid breaking changes in the public API.
+#[doc(hidden)]
+pub use crate::chunk::{AsChunk, Chunk, ChunkMode};
+#[cfg(feature = "luau")]
+#[doc(hidden)]
+pub use crate::chunk::{CompileConstant, Compiler};
+#[doc(hidden)]
+pub use crate::error::{ErrorContext, ExternalError, ExternalResult};
+#[doc(hidden)]
+pub use crate::string::LuaString as String;
+#[doc(hidden)]
+pub use crate::table::{TablePairs, TableSequence};
+#[doc(hidden)]
+pub use crate::thread::{ThreadEvent, ThreadStatus, ThreadTriggers};
+#[doc(hidden)]
+pub use crate::userdata::{
+    MetaMethod, UserData, UserDataFields, UserDataMetatable, UserDataMethods, UserDataOwned, UserDataRef,
+    UserDataRefMut, UserDataRegistry,
 };
 
-#[cfg(feature = "async")]
-#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-pub use crate::{thread::AsyncThread, traits::LuaNativeAsyncFn};
-
-#[cfg(feature = "serialize")]
+#[cfg(not(feature = "luau"))]
 #[doc(inline)]
-pub use crate::serde::{de::Options as DeserializeOptions, ser::Options as SerializeOptions, LuaSerdeExt};
+pub use crate::debug::HookTriggers;
 
-#[cfg(feature = "serialize")]
-#[cfg_attr(docsrs, doc(cfg(feature = "serialize")))]
+#[cfg(any(feature = "luau-jit", doc))]
+#[doc(inline)]
+pub use crate::state::JitOptions;
+#[cfg(any(feature = "luau", doc))]
+#[cfg_attr(docsrs, doc(cfg(feature = "luau")))]
+pub use crate::{buffer::Buffer, vector::Vector};
+
+#[cfg(feature = "serde")]
+#[doc(hidden)]
+pub use crate::serde::{DeserializeOptions, SerializeOptions};
+#[cfg(feature = "serde")]
+#[doc(inline)]
+pub use crate::{serde::LuaSerdeExt, value::SerializableValue};
+
+#[cfg(feature = "serde")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 pub mod serde;
 
 #[cfg(feature = "mlua_derive")]
@@ -150,54 +176,7 @@ pub mod serde;
 #[macro_use]
 extern crate mlua_derive;
 
-/// Create a type that implements [`AsChunk`] and can capture Rust variables.
-///
-/// This macro allows to write Lua code directly in Rust code.
-///
-/// Rust variables can be referenced from Lua using `$` prefix, as shown in the example below.
-/// User's Rust types needs to implement [`UserData`] or [`IntoLua`] traits.
-///
-/// Captured variables are **moved** into the chunk.
-///
-/// ```
-/// use mlua::{Lua, Result, chunk};
-///
-/// fn main() -> Result<()> {
-///     let lua = Lua::new();
-///     let name = "Rustacean";
-///     lua.load(chunk! {
-///         print("hello, " .. $name)
-///     }).exec()
-/// }
-/// ```
-///
-/// ## Syntax issues
-///
-/// Since the Rust tokenizer will tokenize Lua code, this imposes some restrictions.
-/// The main thing to remember is:
-///
-/// - Use double quoted strings (`""`) instead of single quoted strings (`''`).
-///
-///   (Single quoted strings only work if they contain a single character, since in Rust,
-///   `'a'` is a character literal).
-///
-/// - Using Lua comments `--` is not desirable in **stable** Rust and can have bad side effects.
-///
-///   This is because procedural macros have Line/Column information available only in
-///   **nightly** Rust. Instead, Lua chunks represented as a big single line of code in stable Rust.
-///
-///   As workaround, Rust comments `//` can be used.
-///
-/// Other minor limitations:
-///
-/// - Certain escape codes in string literals don't work. (Specifically: `\a`, `\b`, `\f`, `\v`,
-///   `\123` (octal escape codes), `\u`, and `\U`).
-///
-///   These are accepted: : `\\`, `\n`, `\t`, `\r`, `\xAB` (hex escape codes), and `\0`.
-///
-/// - The `//` (floor division) operator is unusable, as its start a comment.
-///
-/// Everything else should work.
+#[doc = include_str!("../docs/chunk.md")]
 #[cfg(feature = "macros")]
 #[cfg_attr(docsrs, doc(cfg(feature = "macros")))]
 pub use mlua_derive::chunk;
@@ -210,48 +189,18 @@ pub use mlua_derive::chunk;
 #[cfg_attr(docsrs, doc(cfg(feature = "macros")))]
 pub use mlua_derive::FromLua;
 
-/// Registers Lua module entrypoint.
-///
-/// You can register multiple entrypoints as required.
-///
-/// ```
-/// use mlua::{Lua, Result, Table};
-///
-/// #[mlua::lua_module]
-/// fn my_module(lua: &Lua) -> Result<Table> {
-///     let exports = lua.create_table()?;
-///     exports.set("hello", "world")?;
-///     Ok(exports)
-/// }
-/// ```
-///
-/// Internally in the code above the compiler defines C function `luaopen_my_module`.
-///
-/// You can also pass options to the attribute:
-///
-/// * name - name of the module, defaults to the name of the function
-///
-/// ```ignore
-/// #[mlua::lua_module(name = "alt_module")]
-/// fn my_module(lua: &Lua) -> Result<Table> {
-///     ...
-/// }
-/// ```
-///
-/// * skip_memory_check - skip memory allocation checks for some operations.
-///
-/// In module mode, mlua runs in unknown environment and cannot say are there any memory
-/// limits or not. As result, some operations that require memory allocation runs in
-/// protected mode. Setting this attribute will improve performance of such operations
-/// with risk of having uncaught exceptions and memory leaks.
-///
-/// ```ignore
-/// #[mlua::lua_module(skip_memory_check)]
-/// fn my_module(lua: &Lua) -> Result<Table> {
-///     ...
-/// }
-/// ```
-#[cfg(any(feature = "module", docsrs))]
+#[doc = include_str!("../docs/UserData.md")]
+#[cfg(feature = "macros")]
+#[cfg_attr(docsrs, doc(cfg(feature = "macros")))]
+pub use mlua_derive::UserData;
+
+#[doc(hidden)]
+#[cfg(feature = "macros")]
+#[cfg_attr(docsrs, doc(cfg(feature = "macros")))]
+pub use mlua_derive::userdata_impl;
+
+#[doc = include_str!("../docs/lua_module.md")]
+#[cfg(all(feature = "mlua_derive", any(feature = "module", doc)))]
 #[cfg_attr(docsrs, doc(cfg(feature = "module")))]
 pub use mlua_derive::lua_module;
 

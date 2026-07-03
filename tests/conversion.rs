@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::ffi::{CStr, CString, OsString};
+use std::ffi::{CString, OsString};
 use std::path::PathBuf;
 
 use bstr::BString;
@@ -49,7 +49,7 @@ fn test_string_from_lua() -> Result<()> {
     let lua = Lua::new();
 
     // From stack
-    let f = lua.create_function(|_, s: mlua::String| Ok(s))?;
+    let f = lua.create_function(|_, s: mlua::LuaString| Ok(s))?;
     let s = f.call::<String>("hello, world!")?;
     assert_eq!(s, "hello, world!");
 
@@ -267,7 +267,7 @@ fn test_registry_value_into_lua() -> Result<()> {
     let r = lua.create_registry_value(&s)?;
     let value1 = lua.pack(&r)?;
     let value2 = lua.pack(r)?;
-    assert_eq!(value1.as_str().as_deref(), Some("hello, world"));
+    assert_eq!(value1.to_string()?, "hello, world");
     assert_eq!(value1.to_pointer(), value2.to_pointer());
 
     // Push into stack
@@ -450,8 +450,8 @@ fn test_conv_cstring() -> Result<()> {
     let s2: CString = lua.globals().get("s")?;
     assert_eq!(s, s2);
 
-    let cs = CStr::from_bytes_with_nul(b"hello\0").unwrap();
-    lua.globals().set("cs", cs)?;
+    let cs = c"hello";
+    lua.globals().set("cs", c"hello")?;
     let cs2: CString = lua.globals().get("cs")?;
     assert_eq!(cs, cs2.as_c_str());
 
@@ -560,11 +560,11 @@ fn test_osstring_into_from_lua() -> Result<()> {
 
     let v = lua.pack(s.as_os_str())?;
     assert!(v.is_string());
-    assert_eq!(v.as_str().unwrap(), "hello, world");
+    assert_eq!(v.as_string().unwrap(), "hello, world");
 
     let v = lua.pack(s)?;
     assert!(v.is_string());
-    assert_eq!(v.as_str().unwrap(), "hello, world");
+    assert_eq!(v.as_string().unwrap(), "hello, world");
 
     let s = lua.create_string("hello, world")?;
     let bstr = lua.unpack::<OsString>(Value::String(s))?;
@@ -588,11 +588,11 @@ fn test_pathbuf_into_from_lua() -> Result<()> {
 
     let v = lua.pack(pb.as_path())?;
     assert!(v.is_string());
-    assert_eq!(v.as_str().unwrap(), pb_str);
+    assert_eq!(v.to_string().unwrap(), pb_str);
 
     let v = lua.pack(pb.clone())?;
     assert!(v.is_string());
-    assert_eq!(v.as_str().unwrap(), pb_str);
+    assert_eq!(v.to_string().unwrap(), pb_str);
 
     let s = lua.create_string(pb_str)?;
     let bstr = lua.unpack::<PathBuf>(Value::String(s))?;
@@ -708,9 +708,10 @@ fn test_either_from_lua() -> Result<()> {
                 },
                 err => panic!("expected `Error::BadArgument`, got {err:?}"),
             }
-            assert!(err
-                .to_string()
-                .starts_with("bad argument #1: error converting Lua string to Either<i32, Table>"),);
+            assert!(
+                err.to_string()
+                    .starts_with("bad argument #1: error converting Lua string to Either<i32, Table>"),
+            );
         }
         err => panic!("expected `Error::CallbackError`, got {err:?}"),
     }
@@ -724,7 +725,7 @@ fn test_char_into_lua() -> Result<()> {
 
     let v = '🦀';
     let v2 = v.into_lua(&lua)?;
-    assert_eq!(Some(v.to_string()), v2.as_string_lossy());
+    assert_eq!(*v2.as_string().unwrap(), v.to_string());
 
     Ok(())
 }
@@ -736,15 +737,18 @@ fn test_char_from_lua() -> Result<()> {
     assert_eq!(lua.convert::<char>("A")?, 'A');
     assert_eq!(lua.convert::<char>(65)?, 'A');
     assert_eq!(lua.convert::<char>(128175)?, '💯');
-    assert!(lua
-        .convert::<char>(5456324)
-        .is_err_and(|e| e.to_string().contains("integer out of range")));
-    assert!(lua
-        .convert::<char>("hello")
-        .is_err_and(|e| e.to_string().contains("expected string to have exactly one char")));
-    assert!(lua
-        .convert::<char>(HashMap::<String, String>::new())
-        .is_err_and(|e| e.to_string().contains("expected string or integer")));
+    assert!(
+        lua.convert::<char>(5456324)
+            .is_err_and(|e| e.to_string().contains("integer out of range"))
+    );
+    assert!(
+        lua.convert::<char>("hello")
+            .is_err_and(|e| e.to_string().contains("expected string to have exactly one char"))
+    );
+    assert!(
+        lua.convert::<char>(HashMap::<String, String>::new())
+            .is_err_and(|e| e.to_string().contains("expected string or integer"))
+    );
 
     Ok(())
 }

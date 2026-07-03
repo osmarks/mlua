@@ -1,8 +1,28 @@
+#[cfg(not(target_os = "wasi"))]
 use std::{fs, io};
 
-use mlua::{Chunk, Lua, Result};
+use mlua::{Chunk, ChunkMode, Lua, Result};
 
 #[test]
+fn test_chunk_methods() -> Result<()> {
+    let lua = Lua::new();
+
+    #[cfg(unix)]
+    assert!(lua.load("return 123").name().starts_with("@tests/chunk.rs"));
+    let chunk2 = lua.load("return 123").set_name("@new_name");
+    assert_eq!(chunk2.name(), "@new_name");
+
+    let env = lua.create_table_from([("a", 987)])?;
+    let chunk3 = lua.load("return a").set_environment(env.clone());
+    assert_eq!(chunk3.environment().unwrap(), &env);
+    assert_eq!(chunk3.mode(), ChunkMode::Text);
+    assert_eq!(chunk3.call::<i32>(())?, 987);
+
+    Ok(())
+}
+
+#[test]
+#[cfg(not(target_os = "wasi"))]
 fn test_chunk_path() -> Result<()> {
     let lua = Lua::new();
 
@@ -66,7 +86,7 @@ fn test_chunk_macro() -> Result<()> {
     data.raw_set("num", 1)?;
 
     let ud = mlua::AnyUserData::wrap("hello");
-    let f = mlua::Function::wrap(|| Ok(()));
+    let f = mlua::Function::wrap(|| Ok::<_, mlua::Error>(()));
 
     lua.globals().set("g", 123)?;
 
@@ -90,6 +110,21 @@ fn test_chunk_macro() -> Result<()> {
 
     assert_eq!(lua.globals().get::<i32>("s")?, 321);
 
+    // Check line numbers in error reporting
+    match lua
+        .load(mlua::chunk! {
+            local x = 1
+            -- comment
+            error("boom")
+        })
+        .exec()
+    {
+        Err(mlua::Error::RuntimeError(ref msg)) => {
+            assert!(msg.contains(":3:"), "expected line 3, got: {msg}");
+        }
+        other => panic!("expected RuntimeError, got {other:?}"),
+    }
+
     Ok(())
 }
 
@@ -101,12 +136,11 @@ fn test_compiler() -> Result<()> {
         .set_debug_level(2)
         .set_type_info_level(1)
         .set_coverage_level(2)
-        .set_vector_lib("vector")
-        .set_vector_ctor("new")
+        .set_vector_ctor("vector.new")
         .set_vector_type("vector")
-        .set_mutable_globals(vec!["mutable_global"])
-        .set_userdata_types(vec!["MyUserdata"])
-        .set_disabled_builtins(vec!["tostring"]);
+        .set_mutable_globals(["mutable_global"])
+        .set_userdata_types(["MyUserdata"])
+        .set_disabled_builtins(["tostring"]);
 
     assert!(compiler.compile("return tostring(vector.new(1, 2, 3))").is_ok());
 
@@ -124,16 +158,14 @@ fn test_compiler() -> Result<()> {
 #[cfg(feature = "luau")]
 #[test]
 fn test_compiler_library_constants() {
-    use mlua::{CompileConstant, Compiler, Vector};
+    use mlua::{Compiler, Vector};
 
     let compiler = Compiler::new()
         .set_optimization_level(2)
-        .set_library_constants(vec![
-            ("mylib", "const_bool", CompileConstant::Boolean(true)),
-            ("mylib", "const_num", CompileConstant::Number(123.0)),
-            ("mylib", "const_vec", CompileConstant::Vector(Vector::zero())),
-            ("mylib", "const_str", "value1".into()),
-        ]);
+        .add_library_constant("mylib.const_bool", true)
+        .add_library_constant("mylib.const_num", 123.0)
+        .add_library_constant("mylib.const_vec", Vector::zero())
+        .add_library_constant("mylib.const_str", "value1");
 
     let lua = Lua::new();
     lua.set_compiler(compiler);

@@ -1,10 +1,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
-use std::string::String as StdString;
 use std::sync::Arc;
 
 use mlua::{
-    AnyUserData, Error, Function, Lua, MetaMethod, ObjectLike, Result, String, UserData, UserDataFields,
+    AnyUserData, Error, Function, Lua, LuaString, MetaMethod, ObjectLike, Result, UserData, UserDataFields,
     UserDataMethods, UserDataRegistry,
 };
 
@@ -235,12 +234,14 @@ fn test_scope_userdata_values() -> Result<()> {
 
 #[test]
 fn test_scope_userdata_mismatch() -> Result<()> {
-    struct MyUserData<'a>(&'a Cell<i64>);
+    struct MyUserData<'a>(&'a mut i64);
 
     impl<'a> UserData for MyUserData<'a> {
         fn register(reg: &mut UserDataRegistry<Self>) {
-            reg.add_method("inc", |_, data, ()| {
-                data.0.set(data.0.get() + 1);
+            reg.add_method("get", |_, data, ()| Ok(*data.0));
+
+            reg.add_method_mut("inc", |_, data, ()| {
+                *data.0 = data.0.wrapping_add(1);
                 Ok(())
             });
         }
@@ -251,30 +252,53 @@ fn test_scope_userdata_mismatch() -> Result<()> {
     lua.load(
         r#"
         function inc(a, b) a.inc(b) end
+        function get(a, b) a.get(b) end
     "#,
     )
     .exec()?;
 
-    let a = Cell::new(1);
-    let b = Cell::new(1);
+    let mut a = 1;
+    let mut b = 1;
 
-    let inc: Function = lua.globals().get("inc")?;
     lua.scope(|scope| {
-        let au = scope.create_userdata(MyUserData(&a))?;
-        let bu = scope.create_userdata(MyUserData(&b))?;
-        assert!(inc.call::<()>((&au, &au)).is_ok());
-        match inc.call::<()>((&au, &bu)) {
-            Err(Error::CallbackError { ref cause, .. }) => match cause.as_ref() {
-                Error::BadArgument { to, pos, name, cause } => {
-                    assert_eq!(to.as_deref(), Some("MyUserData.inc"));
-                    assert_eq!(*pos, 1);
-                    assert_eq!(name.as_deref(), Some("self"));
-                    assert!(matches!(*cause.as_ref(), Error::UserDataTypeMismatch));
-                }
+        let au = scope.create_userdata(MyUserData(&mut a))?;
+        let bu = scope.create_userdata(MyUserData(&mut b))?;
+        for method_name in ["get", "inc"] {
+            let f: Function = lua.globals().get(method_name)?;
+            let full_name = format!("MyUserData.{method_name}");
+            let full_name = full_name.as_str();
+
+            assert!(f.call::<()>((&au, &au)).is_ok());
+            match f.call::<()>((&au, &bu)) {
+                Err(Error::CallbackError { ref cause, .. }) => match cause.as_ref() {
+                    Error::BadArgument { to, pos, name, cause } => {
+                        assert_eq!(to.as_deref(), Some(full_name));
+                        assert_eq!(*pos, 1);
+                        assert_eq!(name.as_deref(), Some("self"));
+                        assert!(matches!(*cause.as_ref(), Error::UserDataTypeMismatch));
+                    }
+                    other => panic!("wrong error type {other:?}"),
+                },
+                Err(other) => panic!("wrong error type {other:?}"),
+                Ok(_) => panic!("incorrectly returned Ok"),
+            }
+
+            // Pass non-userdata type
+            let err = f.call::<()>((&au, 321)).err().unwrap();
+            match err {
+                Error::CallbackError { ref cause, .. } => match cause.as_ref() {
+                    Error::BadArgument { to, pos, name, cause } => {
+                        assert_eq!(to.as_deref(), Some(full_name));
+                        assert_eq!(*pos, 1);
+                        assert_eq!(name.as_deref(), Some("self"));
+                        assert!(matches!(*cause.as_ref(), Error::FromLuaConversionError { .. }));
+                    }
+                    other => panic!("wrong error type {other:?}"),
+                },
                 other => panic!("wrong error type {other:?}"),
-            },
-            Err(other) => panic!("wrong error type {other:?}"),
-            Ok(_) => panic!("incorrectly returned Ok"),
+            }
+            let err_msg = format!("bad argument `self` to `{full_name}`: error converting Lua number to userdata (expected userdata of type 'MyUserData')");
+            assert!(err.to_string().contains(&err_msg));
         }
         Ok(())
     })?;
@@ -357,7 +381,8 @@ fn test_scope_userdata_ref() -> Result<()> {
         modify_userdata(&lua, &ud)?;
 
         // We can only borrow userdata scoped
-        assert!((matches!(ud.borrow::<MyUserData>(), Err(Error::UserDataTypeMismatch))));
+        #[rustfmt::skip]
+        assert!(matches!(ud.borrow::<MyUserData>(), Err(Error::UserDataTypeMismatch)));
         ud.borrow_scoped::<MyUserData, ()>(|ud_inst| {
             assert_eq!(ud_inst.0.get(), 2);
         })?;
@@ -394,7 +419,8 @@ fn test_scope_userdata_ref_mut() -> Result<()> {
         let ud = scope.create_userdata_ref_mut(&mut data)?;
         modify_userdata(&lua, &ud)?;
 
-        assert!((matches!(ud.borrow_mut::<MyUserData>(), Err(Error::UserDataTypeMismatch))));
+        #[rustfmt::skip]
+        assert!(matches!(ud.borrow_mut::<MyUserData>(), Err(Error::UserDataTypeMismatch)));
         ud.borrow_mut_scoped::<MyUserData, ()>(|ud_inst| {
             ud_inst.0 += 10;
         })?;
@@ -410,15 +436,15 @@ fn test_scope_userdata_ref_mut() -> Result<()> {
 fn test_scope_any_userdata() -> Result<()> {
     let lua = Lua::new();
 
-    fn register(reg: &mut UserDataRegistry<&mut StdString>) {
-        reg.add_method_mut("push", |_, this, s: String| {
+    fn register(reg: &mut UserDataRegistry<&mut String>) {
+        reg.add_method_mut("push", |_, this, s: LuaString| {
             this.push_str(&s.to_str()?);
             Ok(())
         });
         reg.add_meta_method("__tostring", |_, data, ()| Ok((*data).clone()));
     }
 
-    let mut data = StdString::from("foo");
+    let mut data = String::from("foo");
     lua.scope(|scope| {
         let ud = scope.create_any_userdata(&mut data, register)?;
         lua.globals().set("ud", ud)?;
@@ -500,11 +526,11 @@ fn test_scope_any_userdata_ref_mut() -> Result<()> {
 fn test_scope_destructors() -> Result<()> {
     let lua = Lua::new();
 
-    lua.register_userdata_type::<Arc<StdString>>(|reg| {
+    lua.register_userdata_type::<Arc<String>>(|reg| {
         reg.add_meta_method("__tostring", |_, data, ()| Ok(data.to_string()));
     })?;
 
-    let arc_str = Arc::new(StdString::from("foo"));
+    let arc_str = Arc::new(String::from("foo"));
 
     let ud = lua.create_any_userdata(arc_str.clone())?;
     lua.scope(|scope| {
@@ -517,7 +543,7 @@ fn test_scope_destructors() -> Result<()> {
 
     // Try destructing the userdata while it's borrowed
     let ud = lua.create_any_userdata(arc_str.clone())?;
-    ud.borrow_scoped::<Arc<StdString>, _>(|arc_str| {
+    ud.borrow_scoped::<Arc<String>, _>(|arc_str| {
         assert_eq!(arc_str.as_str(), "foo");
         lua.scope(|scope| {
             scope.add_destructor(|| {

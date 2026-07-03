@@ -1,4 +1,4 @@
-#![cfg(feature = "serialize")]
+#![cfg(feature = "serde")]
 
 use std::collections::HashMap;
 use std::error::Error as StdError;
@@ -25,7 +25,7 @@ fn test_serialize() -> Result<(), Box<dyn StdError>> {
     globals.set("null", lua.null())?;
 
     let empty_array = lua.create_table()?;
-    empty_array.set_metatable(Some(lua.array_metatable()));
+    empty_array.set_metatable(Some(lua.array_metatable()))?;
     globals.set("empty_array", empty_array)?;
 
     let val = lua
@@ -36,7 +36,7 @@ fn test_serialize() -> Result<(), Box<dyn StdError>> {
             _integer = 123,
             _number = 321.99,
             _string = "test string serialization",
-            _table_arr = {nil, "value 1", nil, "value 2", {}},
+            _table_arr = {null, "value 1", 2, "value 3", {}},
             _table_map = {["table"] = "map", ["null"] = null},
             _bytes = "\240\040\140\040",
             _userdata = ud,
@@ -53,7 +53,7 @@ fn test_serialize() -> Result<(), Box<dyn StdError>> {
         "_integer": 123,
         "_number": 321.99,
         "_string": "test string serialization",
-        "_table_arr": [null, "value 1", null, "value 2", {}],
+        "_table_arr": [null, "value 1", 2, "value 3", {}],
         "_table_map": {"table": "map", "null": null},
         "_bytes": [240, 40, 140, 40],
         "_userdata": [123, "test userdata"],
@@ -173,7 +173,7 @@ fn test_serialize_sorted() -> LuaResult<()> {
     globals.set("null", lua.null())?;
 
     let empty_array = lua.create_table()?;
-    empty_array.set_metatable(Some(lua.array_metatable()));
+    empty_array.set_metatable(Some(lua.array_metatable()))?;
     globals.set("empty_array", empty_array)?;
 
     let value = lua
@@ -184,7 +184,7 @@ fn test_serialize_sorted() -> LuaResult<()> {
             _integer = 123,
             _number = 321.99,
             _string = "test string serialization",
-            _table_arr = {nil, "value 1", nil, "value 2", {}},
+            _table_arr = {null, "value 1", 2, "value 3", {}},
             _table_map = {["table"] = "map", ["null"] = null},
             _bytes = "\240\040\140\040",
             _null = null,
@@ -198,7 +198,7 @@ fn test_serialize_sorted() -> LuaResult<()> {
     let json = serde_json::to_string(&value.to_serializable().sort_keys(true)).unwrap();
     assert_eq!(
         json,
-        r#"{"_bool":true,"_bytes":[240,40,140,40],"_empty_array":[],"_empty_map":{},"_integer":123,"_null":null,"_number":321.99,"_string":"test string serialization","_table_arr":[null,"value 1",null,"value 2",{}],"_table_map":{"null":null,"table":"map"}}"#
+        r#"{"_bool":true,"_bytes":[240,40,140,40],"_empty_array":[],"_empty_map":{},"_integer":123,"_null":null,"_number":321.99,"_string":"test string serialization","_table_arr":[null,"value 1",2,"value 3",{}],"_table_map":{"null":null,"table":"map"}}"#
     );
 
     Ok(())
@@ -245,6 +245,71 @@ fn test_serialize_same_table_twice() -> LuaResult<()> {
         .eval::<Value>()?;
     let json = serde_json::to_string(&value.to_serializable().sort_keys(true)).unwrap();
     assert_eq!(json, r#"{"a":{},"b":{}}"#);
+
+    Ok(())
+}
+
+#[test]
+fn test_serialize_empty_table() -> LuaResult<()> {
+    let lua = Lua::new();
+
+    let table = Value::Table(lua.create_table()?);
+    let json = serde_json::to_string(&table.to_serializable()).unwrap();
+    assert_eq!(json, "{}");
+
+    // Set the option to encode empty tables as array
+    let json = serde_json::to_string(&table.to_serializable().encode_empty_tables_as_array(true)).unwrap();
+    assert_eq!(json, "[]");
+
+    // Check hashmap table with this option
+    table.as_table().unwrap().set("hello", "world")?;
+    let json = serde_json::to_string(&table.to_serializable().encode_empty_tables_as_array(true)).unwrap();
+    assert_eq!(json, r#"{"hello":"world"}"#);
+
+    Ok(())
+}
+
+#[test]
+fn test_serialize_mixed_table() -> LuaResult<()> {
+    let lua = Lua::new();
+
+    // Check that sparse array is serialized similarly when using direct serialization
+    // and via `Lua::from_value`
+    let table = lua.load("{1,2,3,nil,5}").eval::<Value>()?;
+    let json1 = serde_json::to_string(&table).unwrap();
+    let json2 = lua.from_value::<serde_json::Value>(table)?;
+    assert_eq!(json1, json2.to_string());
+
+    // A table with several borders should be correctly encoded when `detect_mixed_tables` is enabled
+    let table = lua
+        .load(
+            r#"
+        local t = {1,2,3,nil,5,6}
+        t[10] = 10
+        return t
+    "#,
+        )
+        .eval::<Value>()?;
+    let json = serde_json::to_string(&table.to_serializable().detect_mixed_tables(true)).unwrap();
+    assert_eq!(json, r#"[1,2,3,null,5,6,null,null,null,10]"#);
+
+    // A mixed table with both array-like and map-like entries
+    let table = lua.load(r#"{1,2,3, key="value"}"#).eval::<Value>()?;
+    let json = serde_json::to_string(&table).unwrap();
+    assert_eq!(json, r#"[1,2,3]"#);
+    let json = serde_json::to_string(&table.to_serializable().detect_mixed_tables(true)).unwrap();
+    assert_eq!(json, r#"{"1":1,"2":2,"3":3,"key":"value"}"#);
+
+    // A mixed table with duplicate keys of different types
+    let table = lua.load(r#"{1,2,3, ["1"]="value"}"#).eval::<Value>()?;
+    let json = serde_json::to_string(&table.to_serializable().detect_mixed_tables(true)).unwrap();
+    assert_eq!(json, r#"{"1":1,"2":2,"3":3,"1":"value"}"#);
+
+    // Array metatable takes precedence
+    let table = lua.load(r#"{1,2,3, key="value"}"#).eval::<Value>()?;
+    (table.as_table().unwrap()).set_metatable(Some(lua.array_metatable()))?;
+    let json = serde_json::to_string(&table.to_serializable().detect_mixed_tables(true)).unwrap();
+    assert_eq!(json, r#"[1,2,3]"#);
 
     Ok(())
 }
@@ -663,6 +728,37 @@ fn test_from_value_userdata() -> Result<(), Box<dyn StdError>> {
         Ok(_) => {}
         Err(err) => panic!("expected no errors, got {err:?}"),
     };
+
+    Ok(())
+}
+
+#[test]
+fn test_from_value_empty_table() -> Result<(), Box<dyn StdError>> {
+    let lua = Lua::new();
+
+    // By default we encode empty tables as objects
+    let t = lua.create_table()?;
+    let got = lua.from_value::<serde_json::Value>(Value::Table(t.clone()))?;
+    assert_eq!(got, serde_json::json!({}));
+
+    // Set the option to encode empty tables as array
+    let got = lua
+        .from_value_with::<serde_json::Value>(
+            Value::Table(t.clone()),
+            DeserializeOptions::new().encode_empty_tables_as_array(true),
+        )
+        .unwrap();
+    assert_eq!(got, serde_json::json!([]));
+
+    // Check hashmap table with this option
+    t.raw_set("hello", "world")?;
+    let got = lua
+        .from_value_with::<serde_json::Value>(
+            Value::Table(t),
+            DeserializeOptions::new().encode_empty_tables_as_array(true),
+        )
+        .unwrap();
+    assert_eq!(got, serde_json::json!({"hello": "world"}));
 
     Ok(())
 }

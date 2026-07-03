@@ -13,11 +13,9 @@ use crate::util::check_stack;
 use crate::value::Value;
 
 /// Trait for serializing/deserializing Lua values using Serde.
-#[cfg_attr(docsrs, doc(cfg(feature = "serialize")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 pub trait LuaSerdeExt: Sealed {
     /// A special value (lightuserdata) to encode/decode optional (none) values.
-    ///
-    /// Requires `feature = "serialize"`
     ///
     /// # Example
     ///
@@ -39,10 +37,8 @@ pub trait LuaSerdeExt: Sealed {
     fn null(&self) -> Value;
 
     /// A metatable attachable to a Lua table to systematically encode it as Array (instead of Map).
-    /// As result, encoded Array will contain only sequence part of the table, with the same length
-    /// as the `#` operator on that table.
-    ///
-    /// Requires `feature = "serialize"`
+    /// As a result, encoded Array will contain only sequence part of the table, with the same
+    /// length as the `#` operator on that table.
     ///
     /// # Example
     ///
@@ -70,8 +66,6 @@ pub trait LuaSerdeExt: Sealed {
     fn array_metatable(&self) -> Table;
 
     /// Converts `T` into a [`Value`] instance.
-    ///
-    /// Requires `feature = "serialize"`
     ///
     /// [`Value`]: crate::Value
     ///
@@ -104,8 +98,6 @@ pub trait LuaSerdeExt: Sealed {
 
     /// Converts `T` into a [`Value`] instance with options.
     ///
-    /// Requires `feature = "serialize"`
-    ///
     /// # Example
     ///
     /// ```
@@ -128,8 +120,6 @@ pub trait LuaSerdeExt: Sealed {
         T: Serialize + ?Sized;
 
     /// Deserializes a [`Value`] into any serde deserializable object.
-    ///
-    /// Requires `feature = "serialize"`
     ///
     /// # Example
     ///
@@ -157,8 +147,6 @@ pub trait LuaSerdeExt: Sealed {
     fn from_value<T: DeserializeOwned>(&self, value: Value) -> Result<T>;
 
     /// Deserializes a [`Value`] into any serde deserializable object with options.
-    ///
-    /// Requires `feature = "serialize"`
     ///
     /// # Example
     ///
@@ -254,7 +242,5 @@ static ARRAY_METATABLE_REGISTRY_KEY: u8 = 0;
 pub mod de;
 pub mod ser;
 
-#[doc(inline)]
-pub use de::Deserializer;
-#[doc(inline)]
-pub use ser::Serializer;
+pub use de::{Deserializer, Options as DeserializeOptions};
+pub use ser::{Options as SerializeOptions, Serializer};

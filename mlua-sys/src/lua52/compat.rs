@@ -51,7 +51,8 @@ pub unsafe fn lua_isinteger(L: *mut lua_State, idx: c_int) -> c_int {
     if lua_type(L, idx) == LUA_TNUMBER {
         let n = lua_tonumber(L, idx);
         let i = lua_tointeger(L, idx);
-        if (n - i as lua_Number).abs() < lua_Number::EPSILON {
+        // Lua 5.3+ returns "false" for `-0.0`
+        if n.to_bits() == (i as lua_Number).to_bits() {
             return 1;
         }
     }
@@ -124,7 +125,7 @@ pub unsafe fn lua_rawget(L: *mut lua_State, idx: c_int) -> c_int {
 
 #[inline(always)]
 pub unsafe fn lua_rawgeti(L: *mut lua_State, idx: c_int, n: lua_Integer) -> c_int {
-    let n = n.try_into().expect("cannot convert index to lua_Integer");
+    let n = n.try_into().expect("cannot convert index to c_int");
     lua_rawgeti_(L, idx, n);
     lua_type(L, -1)
 }
@@ -152,7 +153,7 @@ pub unsafe fn lua_seti(L: *mut lua_State, mut idx: c_int, n: lua_Integer) {
 
 #[inline(always)]
 pub unsafe fn lua_rawseti(L: *mut lua_State, idx: c_int, n: lua_Integer) {
-    let n = n.try_into().expect("cannot convert index from lua_Integer");
+    let n = n.try_into().expect("cannot convert index to c_int");
     lua_rawseti_(L, idx, n)
 }
 
@@ -199,16 +200,16 @@ pub unsafe fn luaL_tolstring(L: *mut lua_State, mut idx: c_int, len: *mut usize)
     if luaL_callmeta(L, idx, cstr!("__tostring")) == 0 {
         match lua_type(L, idx) {
             LUA_TNIL => {
-                lua_pushliteral(L, "nil");
+                lua_pushliteral(L, c"nil");
             }
             LUA_TSTRING | LUA_TNUMBER => {
                 lua_pushvalue(L, idx);
             }
             LUA_TBOOLEAN => {
                 if lua_toboolean(L, idx) == 0 {
-                    lua_pushliteral(L, "false");
+                    lua_pushliteral(L, c"false");
                 } else {
-                    lua_pushliteral(L, "true");
+                    lua_pushliteral(L, c"true");
                 }
             }
             t => {
@@ -232,7 +233,7 @@ pub unsafe fn luaL_tolstring(L: *mut lua_State, mut idx: c_int, len: *mut usize)
 
 pub unsafe fn luaL_requiref(L: *mut lua_State, modname: *const c_char, openf: lua_CFunction, glb: c_int) {
     luaL_checkstack(L, 3, cstr!("not enough stack slots available"));
-    luaL_getsubtable(L, LUA_REGISTRYINDEX, cstr!("_LOADED"));
+    luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
     if lua_getfield(L, -1, modname) == LUA_TNIL {
         lua_pop(L, 1);
         lua_pushcfunction(L, openf);

@@ -8,9 +8,7 @@ use crate::state::{Lua, LuaGuard, RawLua};
 use crate::traits::{FromLuaMulti, IntoLuaMulti};
 use crate::types::{Callback, CallbackUpvalue, ScopedCallback, ValueRef};
 use crate::userdata::{AnyUserData, UserData, UserDataRegistry, UserDataStorage};
-use crate::util::{
-    self, assert_stack, check_stack, get_metatable_ptr, get_userdata, take_userdata, StackGuard,
-};
+use crate::util::{self, StackGuard, check_stack, get_metatable_ptr, get_userdata, take_userdata};
 
 /// Constructed by the [`Lua::scope`] method, allows temporarily creating Lua userdata and
 /// callbacks that are not required to be `Send` or `'static`.
@@ -158,38 +156,7 @@ impl<'scope, 'env: 'scope> Scope<'scope, 'env> {
     where
         T: UserData + 'env,
     {
-        let state = self.lua.state();
-        unsafe {
-            let _sg = StackGuard::new(state);
-            check_stack(state, 3)?;
-
-            // We don't write the data to the userdata until pushing the metatable
-            let protect = !self.lua.unlikely_memory_error();
-            #[cfg(feature = "luau")]
-            let ud_ptr = {
-                let data = UserDataStorage::new_scoped(data);
-                util::push_userdata::<UserDataStorage<T>>(state, data, protect)?
-            };
-            #[cfg(not(feature = "luau"))]
-            let ud_ptr = util::push_uninit_userdata::<UserDataStorage<T>>(state, protect)?;
-
-            // Push the metatable and register it with no TypeId
-            let mut registry = UserDataRegistry::new_unique(self.lua.lua(), ud_ptr as *mut _);
-            T::register(&mut registry);
-            self.lua.push_userdata_metatable(registry.into_raw())?;
-            let mt_ptr = ffi::lua_topointer(state, -1);
-            self.lua.register_userdata_metatable(mt_ptr, None);
-
-            // Write data to the pointer and attach metatable
-            #[cfg(not(feature = "luau"))]
-            std::ptr::write(ud_ptr, UserDataStorage::new_scoped(data));
-            ffi::lua_setmetatable(state, -2);
-
-            let ud = AnyUserData(self.lua.pop_ref());
-            self.seal_userdata::<T>(&ud);
-
-            Ok(ud)
-        }
+        self.create_any_userdata(data, T::register)
     }
 
     /// Creates a Lua userdata object from a custom Rust type.
@@ -216,7 +183,7 @@ impl<'scope, 'env: 'scope> Scope<'scope, 'env> {
             #[cfg(feature = "luau")]
             let ud_ptr = {
                 let data = UserDataStorage::new_scoped(data);
-                util::push_userdata::<UserDataStorage<T>>(state, data, protect)?
+                util::push_userdata(state, data, protect)?
             };
             #[cfg(not(feature = "luau"))]
             let ud_ptr = util::push_uninit_userdata::<UserDataStorage<T>>(state, protect)?;
@@ -284,22 +251,18 @@ impl<'scope, 'env: 'scope> Scope<'scope, 'env> {
     /// Shortens the lifetime of the userdata to the lifetime of the scope.
     fn seal_userdata<T: 'env>(&self, ud: &AnyUserData) {
         let destructor: DestructorCallback = Box::new(|rawlua, vref| unsafe {
-            let state = rawlua.state();
-            let _sg = StackGuard::new(state);
-            assert_stack(state, 2);
-
             // Ensure that userdata is not destructed
-            match rawlua.push_userdata_ref(&vref) {
+            match rawlua.get_userdata_ref_type_id(&vref) {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     // Deregister metatable
-                    let mt_ptr = get_metatable_ptr(state, -1);
+                    let mt_ptr = get_metatable_ptr(rawlua.ref_thread(), vref.index);
                     rawlua.deregister_userdata_metatable(mt_ptr);
                 }
                 Err(_) => return vec![],
             }
 
-            let data = take_userdata::<UserDataStorage<T>>(state);
+            let data = take_userdata::<UserDataStorage<T>>(rawlua.ref_thread(), vref.index);
             vec![Box::new(move || drop(data))]
         });
         self.destructors.0.borrow_mut().push((ud.0.clone(), destructor));
