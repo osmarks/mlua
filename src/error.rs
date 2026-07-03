@@ -205,6 +205,8 @@ pub enum Error {
         /// Underlying error.
         cause: Arc<Error>,
     },
+    #[cfg(feature = "anyhow")]
+    AnyhowExternalError(Arc<anyhow::Error>)
 }
 
 /// A specialized `Result` type used by `mlua`'s API.
@@ -321,7 +323,8 @@ impl fmt::Display for Error {
             Error::WithContext { context, cause } => {
                 writeln!(fmt, "{context}")?;
                 write!(fmt, "{cause}")
-            }
+            },
+            Error::AnyhowExternalError(err) => err.fmt(fmt)
         }
     }
 }
@@ -513,7 +516,7 @@ impl From<anyhow::Error> for Error {
     fn from(err: anyhow::Error) -> Self {
         match err.downcast::<Self>() {
             Ok(err) => err,
-            Err(err) => Error::external(err),
+            Err(err) => Error::AnyhowExternalError(Arc::new(err)),
         }
     }
 }
@@ -542,6 +545,10 @@ impl<'a> Iterator for Chain<'a> {
                     }
                     Error::ExternalError(err) => {
                         self.current = Some(&**err);
+                        self.current
+                    }
+                    Error::AnyhowExternalError(err) => {
+                        self.current = Some(&***err);
                         self.current
                     }
                     _ => None,
